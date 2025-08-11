@@ -20,7 +20,7 @@ from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.corpus import stopwords
 import re
 from dotenv.main import load_dotenv
-
+from app.database import get_user_full_name
 from app.models import AI_User, AI_ChatSession, AI_ChatMessage, AI_Document, AI_DocumentChunk
 
 # Load environment variables
@@ -51,6 +51,7 @@ class AIAssistant:
     def __init__(self, db_session: Session) -> None:
         """Initialize the AI Assistant."""
         self.db = db_session
+
         
         # Initialize OpenAI client with validation
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -632,10 +633,12 @@ class AIAssistant:
     def _generate_response(self, query: str, context_text: str) -> str:
         """
         Generate AI response using OpenAI API.
-        """
+        """ 
         try:
-            system_prompt = """
-            You are an AI football/soccer expert assistant that provides information ONLY from the uploaded documents. Your knowledge comes from a comprehensive collection of documents covering:
+            system_prompt = f"""
+            You are an AI football/soccer expert assistant that provides information ONLY from the uploaded documents.
+            Your are currently talking to {self.user_full_name if self.user_full_name else 'User'}.
+            Your knowledge comes from a comprehensive collection of documents covering:
 
             1. Nutrition - Diet and nutritional guidance for footballers
             2. Strength and Conditioning - Physical training and development
@@ -680,6 +683,8 @@ class AIAssistant:
     
     def process_message(self, session_id: str, query_text: str, email: str) -> str:
         try:
+            # Set users full name
+            self.user_full_name = get_user_full_name(email)
             # Get conversation history
             previous_messages = self.db.query(AI_ChatMessage).filter(
                 AI_ChatMessage.session_id == session_id

@@ -61,3 +61,29 @@ def check_user_auth(db, email: str) -> tuple[bool, bool]:
     except Exception as e:
         print(f"Error checking user auth: {e}")
         return False, False
+    
+
+
+def get_user_full_name(email: str):
+    """
+    Get user's full name from account_userauth table.
+    
+    Args:
+        email: User email to lookup
+        
+    Returns:
+        str: User's full name or None if not found
+    """
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            text("SELECT full_name FROM account_userauth WHERE email = :email"),
+            {"email": email}
+        ).first()
+        
+        return result[0] if result else None
+    except Exception as e:
+        print(f"Error getting user full name: {e}")
+        return None
+    finally:
+        db.close()
