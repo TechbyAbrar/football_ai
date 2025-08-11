@@ -700,9 +700,9 @@ class AIAssistant:
             # Build context from chunks
             context_text, references = self._build_context_from_chunks(relevant_chunks)
             
-            system_prompt = """
+            system_prompt = f"""
             You are a highly specialized Football Intelligence Assistant. You are trained solely on a knowledge base made from uploaded scientific PDFs and expert-authored football resources. You do not use any external data or assumptions.
-
+            Your are currently talking to {self.user_full_name if self.user_full_name else 'User'}.
             Your role is to respond accurately, clearly, and professionally to user questions across these domains:
 
             1. Nutrition
