@@ -1,16 +1,13 @@
 #api.py
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Response
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, EmailStr
 from pydantic.config import ConfigDict
 import logging
 from datetime import datetime, timedelta, timezone
-import uuid
 import os
-import shutil
 from dotenv.main import load_dotenv
 
 from app.models import Base, AI_User, AI_ChatSession, AI_ChatMessage, AI_Document
@@ -91,24 +88,6 @@ class DocumentListResponse(BaseModelWithConfig):
 class DeleteDocumentsRequest(BaseModelWithConfig):
     email: str
     document_ids: List[str]
-
-# Add this function to check staff status
-def check_staff_status(db: Session, email: str) -> bool:
-    """Check if user exists in account_userauth table and is staff"""
-    result = db.execute(
-        text("SELECT is_staff FROM account_userauth WHERE email = :email"),
-        {"email": email}
-    ).first()
-    return bool(result and result[0])
-
-# Add this function to check user exists
-def check_user_exists(db: Session, email: str) -> bool:
-    """Check if user exists in account_userauth table"""
-    result = db.execute(
-        text("SELECT email FROM account_userauth WHERE email = :email"),
-        {"email": email}
-    ).first()
-    return bool(result)
 
 @app.post("/ai/chat_session/")
 async def create_chat_session(
@@ -663,62 +642,6 @@ async def delete_documents(
         )
 
 
-@app.post("/ai/reset_model/", response_model=Dict[str, Any])
-async def reset_model(request: EmailRequest, db: Session = Depends(get_db)):
-    """Reset the vector store and reprocess all documents for a user."""
-
-    try:
-
-        # Check if user exists and is admin
-
-        user = db.query(AI_User).filter(AI_User.email == request.email).first()
-
-        if not user or not user.is_admin:
-
-            raise HTTPException(
-                status_code=403, detail="Only administrators can reset the model"
-            )
-
-        # Initialize AI Assistant
-
-        ai_assistant = AIAssistant(db)
-
-        # Reset user's collection
-
-        try:
-
-            result = ai_assistant.reset_user_collection(request.email)
-
-            return {
-                "success": True,
-                "message": "Model reset successfully. You can now upload new documents.",
-                "details": result,
-            }
-
-        except AIAssistantError as e:
-
-            logger.error(f"Error resetting model: {str(e)}")
-
-            raise HTTPException(status_code=500, detail=str(e))
-
-    except HTTPException as e:
-
-        raise e
-
-    except Exception as e:
-
-        logger.error(f"Error in reset_model: {str(e)}")
-
-        raise HTTPException(
-            status_code=500,
-            json_content={
-                "success": False,
-                "message": "Failed to reset model",
-                "error": str(e),
-            },
-        )
-
-
 @app.get("/ai/search/")
 async def search_sessions(q: str, email: EmailStr, db: Session = Depends(get_db)):
     """
@@ -786,56 +709,6 @@ async def search_sessions(q: str, email: EmailStr, db: Session = Depends(get_db)
         logger.error(f"Error searching sessions: {str(e)}")
 
         raise HTTPException(status_code=500, detail="Internal server error")
-
-@app.post("/ai/reprocess_chunks/")
-async def reprocess_chunks(request: EmailRequest, db: Session = Depends(get_db)):
-    """Reprocess existing document chunks from database into ChromaDB."""
-    try:
-        # Ensure clean state
-        db.rollback()
-        
-        # Check if user exists and is staff
-        exists, is_staff = check_user_auth(db, request.email)
-        if not exists:
-            raise HTTPException(
-                status_code=403,
-                detail="User not found in authentication records"
-            )
-        if not is_staff:
-            raise HTTPException(
-                status_code=403,
-                detail="Only staff members can reprocess chunks"
-            )
-
-        # Initialize AI Assistant
-        ai_assistant = AIAssistant(db)
-
-        # Reset ChromaDB and reprocess chunks
-        try:
-            result = ai_assistant.quick_reset_and_reprocess()
-            return {
-                "success": True,
-                "message": "Successfully reprocessed chunks",
-                "details": result
-            }
-        except AIAssistantError as e:
-            db.rollback()
-            logger.error(f"Error reprocessing chunks: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error in reprocess_chunks: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to reprocess chunks: {e}"
-        )
-    finally:
-        # Ensure clean state before returning
-        db.rollback()
 
 if __name__ == "__main__":
 

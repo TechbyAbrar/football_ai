@@ -13,14 +13,15 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not found in environment variables")
 
-# Create SQLAlchemy engine
+# Create SQLAlchemy engine with optimized connection pooling
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,  # Enables automatic reconnection
-    pool_size=5,  # Set a reasonable pool size
-    max_overflow=10,  # Allow up to 10 connections to overflow
+    pool_size=20,  # Increased pool size for better performance
+    max_overflow=30,  # Allow more overflow connections
     pool_timeout=30,  # Connection timeout in seconds
-    echo=True,  # Set to False in production
+    pool_recycle=3600,  # Recycle connections every hour
+    echo=False,  # Disabled in production for performance
 )
 
 # Create SessionLocal class

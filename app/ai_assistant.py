@@ -1,11 +1,12 @@
 import os
 import logging
 import uuid
-import asyncio
-from typing import List, Dict, Any, Optional, Tuple, cast, TypeVar, Union
+from typing import List, Dict, Any, Optional, Tuple, cast
 from datetime import datetime
 import tempfile
 import shutil
+from functools import lru_cache
+import hashlib
 
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
@@ -51,6 +52,11 @@ class AIAssistant:
     def __init__(self, db_session: Session) -> None:
         """Initialize the AI Assistant."""
         self.db = db_session
+        
+        # Initialize caching for performance optimization
+        self._document_cache = {}
+        self._embedding_cache = {}
+        self._cache_timestamp = datetime.now()
 
         
         # Initialize OpenAI client with validation
@@ -91,6 +97,26 @@ class AIAssistant:
         # Directory for storing uploaded PDFs
         self.upload_dir = "uploads"
         os.makedirs(self.upload_dir, exist_ok=True)
+
+    def _get_cache_key(self, prefix: str) -> str:
+        """Generate cache key with hourly refresh."""
+        return f"{prefix}_{datetime.now().hour}"
+    
+    def _get_cached_embedding(self, text: str) -> List[float]:
+        """Cache embeddings to avoid recomputation."""
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        if text_hash not in self._embedding_cache:
+            self._embedding_cache[text_hash] = self.embedding_model.encode(text).tolist()
+        return self._embedding_cache[text_hash]
+    
+    def _get_cached_documents(self) -> List[AI_Document]:
+        """Cache public documents with hourly refresh."""
+        cache_key = self._get_cache_key("public_docs")
+        if cache_key not in self._document_cache:
+            self._document_cache[cache_key] = self.db.query(AI_Document).filter(
+                AI_Document.is_public == True
+            ).all()
+        return self._document_cache[cache_key]
 
     def get_or_create_collection(self, email: str) -> Collection:
         """Get or create ChromaDB collections for a user.
@@ -239,8 +265,8 @@ class AIAssistant:
             # Use provided category or default
             chunk_category = category or "Uncategorized"
             
-            # Process chunks in batches for better performance
-            batch_size = 50
+            # Process chunks in batches for better performance - increased batch size
+            batch_size = 100  # Increased from 50 for better performance
             for i in range(0, len(chunks), batch_size):
                 batch_chunks = chunks[i:i + batch_size]
                 
@@ -555,54 +581,30 @@ class AIAssistant:
             logger.error(f"Error reprocessing chunks: {e}")
             raise AIAssistantError(f"Failed to reprocess chunks: {e}")
 
-    def quick_reset_and_reprocess(self) -> Dict[str, Any]:
+    def _retrieve_relevant_context(self, email: str, query: str, n_results: int = 5) -> List[Dict]:
         """
-        Quick reset of ChromaDB and reprocess all existing chunks.
-        This is a convenience method that combines reset and reprocessing.
-        """
-        try:
-            # Ensure any existing transaction is rolled back
-            self.db.rollback()
-            
-            # First reset the ChromaDB
-            self.reset_user_collection("")  # Empty email as we're using public collection
-            
-            # Then reprocess all chunks
-            result = self.reprocess_existing_chunks_to_chroma()
-            
-            return {
-                "status": "success",
-                "reset": "completed",
-                "reprocess": result
-            }
-            
-        except Exception as e:
-            self.db.rollback()
-            logger.error(f"Error in quick reset and reprocess: {e}")
-            raise AIAssistantError(f"Failed to reset and reprocess: {e}")
-    
-    def _retrieve_relevant_context(self, email: str, query: str, n_results: int = 10) -> List[Dict]:
-        """
-        Retrieve relevant context from all public documents.
+        Retrieve relevant context from all public documents with caching optimization.
+        Reduced default n_results from 10 to 5 for better performance.
         """
         try:
             # Get public collection
             collection = self.get_or_create_collection(email)
             
-            # Get all public documents
-            documents = self.db.query(AI_Document).filter(AI_Document.is_public == True).all()
+            # Get cached public documents instead of querying every time
+            documents = self._get_cached_documents()
             
             # If no documents exist, return empty list
             if not documents:
                 return []
             
-            # Get query embedding
-            query_embedding = self.embedding_model.encode(query).tolist()
+            # Get cached query embedding
+            query_embedding = self._get_cached_embedding(query)
             
-            # Search for similar chunks
+            # Search for similar chunks with metadata filtering for better performance
             results = collection.query(
                 query_embeddings=[query_embedding],
                 n_results=min(n_results, len(documents)),  # Don't request more results than documents
+                where={"is_public": "true"},  # Pre-filter in ChromaDB for performance
                 include=['documents', 'metadatas', 'distances']
             )
             
@@ -630,68 +632,18 @@ class AIAssistant:
             logger.error(f"Error retrieving context: {e}")
             raise AIAssistantError(f"Failed to retrieve context: {e}")
     
-    def _generate_response(self, query: str, context_text: str) -> str:
-        """
-        Generate AI response using OpenAI API.
-        """ 
-        try:
-            system_prompt = f"""
-            You are an AI football/soccer expert assistant that provides information ONLY from the uploaded documents.
-            Your are currently talking to {self.user_full_name if self.user_full_name else 'User'}.
-            Your knowledge comes from a comprehensive collection of documents covering:
 
-            1. Nutrition - Diet and nutritional guidance for footballers
-            2. Strength and Conditioning - Physical training and development
-            3. Training Program Scheduling - Program design and periodization
-            4. General Player Advice - Overall development and career guidance
-            5. Injury Prevention and Management - Injury care and prevention strategies
-            6. Mental Well-Being - Psychological aspects and mental health
-            7. Performance Analytics Tips - Data-driven performance insights
-            8. Tactical Development - Game strategy and tactical analysis
-
-            STRICT REQUIREMENTS:
-            1. ONLY use information from the provided document excerpts
-            2. NEVER make assumptions or use external football knowledge
-            3. If the documents don't contain relevant information, clearly state this
-            4. Provide specific document citations for every piece of information
-            5. Format citations as: [Document Title | Category | Page X]
-            6. Focus on practical, actionable advice when possible
-            7. Maintain scientific accuracy while being clear and concise
-            8. Consider the holistic development of players (physical, mental, tactical)
-
-            If you cannot find relevant information in the documents, respond with:
-            "I cannot provide specific information about this topic from the available football documents. Please check other reliable sources or consult with qualified professionals."
-            """
-
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {query}"}
-            ]
-
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o" or "gpt-3.5-turbo",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1000
-            )
-
-            return response.choices[0].message.content
-
-        except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            raise AIAssistantError(f"Failed to generate response: {e}")
-    
     def process_message(self, session_id: str, query_text: str, email: str) -> str:
         try:
             # Set users full name
             self.user_full_name = get_user_full_name(email)
-            # Get conversation history
+            # Get conversation history - reduced from 5 to 3 for better performance
             previous_messages = self.db.query(AI_ChatMessage).filter(
                 AI_ChatMessage.session_id == session_id
-            ).order_by(AI_ChatMessage.timestamp.desc()).limit(5).all()
+            ).order_by(AI_ChatMessage.timestamp.desc()).limit(3).all()
             
-            # Retrieve relevant context from all books
-            relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=15)
+            # Retrieve relevant context from all books - reduced from 15 to 8 for better performance
+            relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=8)
             
             # If no relevant chunks found, return a message indicating no documents
             if not relevant_chunks:
@@ -733,7 +685,7 @@ class AIAssistant:
             # Prepare messages for OpenAI
             messages = [{"role": "system", "content": system_prompt}]
             
-            # Create conversation history using a proper loop
+            # Create conversation history using a proper loop - reduced to last 4 messages for performance
             conversation_history = []
             for msg in reversed(previous_messages):
                 conversation_history.extend([
@@ -741,8 +693,8 @@ class AIAssistant:
                     {"role": "assistant", "content": msg.response_text}
                 ])
             
-            # Add conversation history to messages (last 6 messages)
-            messages.extend(conversation_history[:6])
+            # Add conversation history to messages (last 4 messages instead of 6)
+            messages.extend(conversation_history[:4])
             
             # Add current query with context
             user_message = f"""User Query: {query_text}
@@ -765,7 +717,7 @@ class AIAssistant:
             response = self.openai_client.chat.completions.create(
                 model="gpt-4-turbo-preview",  # Using GPT-4 for better responses
                 messages=messages,
-                max_tokens=1500,
+                max_tokens=1200,  # Reduced from 1500 for faster responses
                 temperature=0.7
             )
             
@@ -776,84 +728,6 @@ class AIAssistant:
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             raise AIAssistantError(f"Failed to process message: {e}")
-    
-    def update_session_title(self, session_id: str, query_text: str) -> None:
-        """
-        Update the chat session title based on the first message.
-        
-        Args:
-            session_id: ID of the session to update
-            query_text: First message text to base title on
-            
-        Raises:
-            AIAssistantError: If update fails
-        """
-        try:
-            # Generate a concise title from the query
-            title = (
-                query_text[:47] + "..." 
-                if len(query_text) > 50 
-                else query_text
-            )
-            
-            # Update session title
-            session = self.db.query(AI_ChatSession).filter(
-                AI_ChatSession.id == session_id
-            ).first()
-            
-            if session:
-                session.title = title
-                session.last_updated = datetime.utcnow()
-                self.db.commit()
-                logger.info(f"Updated title for session {session_id}: {title}")
-            else:
-                raise AIAssistantError(f"Session not found: {session_id}")
-                
-        except Exception as e:
-            self.db.rollback()
-            logger.error(f"Failed to update session title: {str(e)}")
-            raise AIAssistantError(f"Failed to update session title: {str(e)}")
-
-    def _cleanup_orphaned_vectors(self, email: str) -> None:
-        """Clean up any orphaned vectors that don't have corresponding database records."""
-        try:
-            collection = self.get_or_create_collection(email)
-            
-            # Get all valid embedding IDs from database for public documents
-            valid_chunks = (
-                self.db.query(AI_DocumentChunk)
-                .join(AI_Document)
-                .filter(AI_Document.is_public == True)
-                .all()
-            )
-            valid_embedding_ids = {chunk.embedding_id for chunk in valid_chunks if chunk.embedding_id}
-            
-            # Get all vectors from ChromaDB
-            try:
-                all_vectors = collection.get()
-                if all_vectors and all_vectors['ids']:
-                    vector_ids = set(all_vectors['ids'])
-                    
-                    # Find orphaned vectors (exist in ChromaDB but not in database)
-                    orphaned_ids = vector_ids - valid_embedding_ids
-                    
-                    if orphaned_ids:
-                        # Delete orphaned vectors in batches
-                        batch_size = 100
-                        orphaned_list = list(orphaned_ids)
-                        
-                        for i in range(0, len(orphaned_list), batch_size):
-                            batch = orphaned_list[i:i + batch_size]
-                            collection.delete(ids=batch)
-                        
-                        logger.info(f"Cleaned up {len(orphaned_ids)} orphaned vectors")
-                    
-            except Exception as e:
-                logger.error(f"Error during vector cleanup: {e}")
-                
-        except Exception as e:
-            logger.error(f"Error during orphaned vector cleanup: {e}")
-            # Don't raise - this is a cleanup operation
 
     def reset_user_collection(self, email: str) -> Dict[str, Any]:
         """Reset/clear all vectors for the public collection."""
@@ -881,260 +755,6 @@ class AIAssistant:
             logger.error(f"Error resetting collection: {e}")
             raise AIAssistantError(f"Failed to reset collection: {e}")
 
-    def cleanup_all_orphaned_vectors(self, email: str) -> Dict[str, Any]:
-        """Clean up all orphaned vectors in the public collection."""
-        try:
-            collection = self.get_or_create_collection(email)
-            
-            # Get all valid embedding IDs from database for public documents
-            valid_chunks = (
-                self.db.query(AI_DocumentChunk)
-                .join(AI_Document)
-                .filter(AI_Document.is_public == True)
-                .all()
-            )
-            valid_embedding_ids = {chunk.embedding_id for chunk in valid_chunks if chunk.embedding_id}
-            
-            # Get all vectors from ChromaDB
-            all_vectors = collection.get()
-            vector_ids = set(all_vectors['ids']) if all_vectors and all_vectors['ids'] else set()
-            
-            # Find orphaned vectors
-            orphaned_ids = vector_ids - valid_embedding_ids
-            
-            if orphaned_ids:
-                # Delete orphaned vectors in batches
-                batch_size = 100
-                orphaned_list = list(orphaned_ids)
-                deleted_count = 0
-                
-                for i in range(0, len(orphaned_list), batch_size):
-                    batch = orphaned_list[i:i + batch_size]
-                    try:
-                        collection.delete(ids=batch)
-                        deleted_count += len(batch)
-                    except Exception as e:
-                        logger.error(f"Error deleting batch: {e}")
-                
-                logger.info(f"Cleaned up {deleted_count} orphaned vectors")
-            
-            return {
-                "total_vectors": len(vector_ids),
-                "valid_vectors": len(valid_embedding_ids),
-                "orphaned_vectors": len(orphaned_ids),
-                "deleted_count": len(orphaned_ids) if orphaned_ids else 0
-            }
-            
-        except Exception as e:
-            logger.error(f"Error cleaning orphaned vectors: {e}")
-            raise AIAssistantError(f"Failed to cleanup vectors: {e}")
-
-    def get_collection_stats(self, email: str) -> Dict[str, Any]:
-        """Get statistics about a user's collection."""
-        try:
-            collection = self.get_or_create_collection(email)
-            
-            # Get collection info
-            all_vectors = collection.get()
-            vector_count = len(all_vectors['ids']) if all_vectors and all_vectors['ids'] else 0
-            
-            # Get database info
-            documents = self.db.query(AI_Document).filter(
-                (AI_Document.admin_email == email) | (AI_Document.is_public == True)
-            ).all()
-            
-            chunks = self.db.query(AI_DocumentChunk).filter(
-                AI_DocumentChunk.document_id.in_([document.id for document in documents])
-            ).all()
-            
-            return {
-                "collection_name": f"user_{email.replace('@', '_').replace('.', '_')}",
-                "vector_count": vector_count,
-                "documents_count": len(documents),
-                "chunks_count": len(chunks),
-                "documents": [{"id": document.id, "name": document.document_name} for document in documents]
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting collection stats: {e}")
-            raise AIAssistantError(f"Failed to get stats: {e}")
-
-    def cleanup_chroma_db_standalone():
-        """Standalone script to clean ChromaDB - run this separately."""
-        import chromadb
-        from chromadb.config import Settings
-        import os
-        import shutil
-        
-        # Option 1: Delete entire ChromaDB directory
-        chroma_dir = "./chroma_db"
-        if os.path.exists(chroma_dir):
-            try:
-                shutil.rmtree(chroma_dir)
-                print(f"Deleted entire ChromaDB directory: {chroma_dir}")
-                
-                # Recreate empty directory
-                os.makedirs(chroma_dir, exist_ok=True)
-                print("Created new empty ChromaDB directory")
-            except Exception as e:
-                print(f"Error deleting ChromaDB directory: {e}")
-        
-        # Option 2: Delete specific collections
-        try:
-            client = chromadb.PersistentClient(
-                path="./chroma_db",
-                settings=Settings(anonymized_telemetry=False)
-            )
-            
-            # List all collections
-            collections = client.list_collections()
-            print(f"Found {len(collections)} collections")
-            
-            for collection in collections:
-                try:
-                    client.delete_collection(name=collection.name)
-                    print(f"Deleted collection: {collection.name}")
-                except Exception as e:
-                    print(f"Error deleting collection {collection.name}: {e}")
-                    
-        except Exception as e:
-            print(f"Error connecting to ChromaDB: {e}")
-
-    def sync_and_cleanup_database():
-        """Sync database and vector store, removing inconsistencies."""
-        from app.database import get_db
-        from app.models import AI_Document, AI_DocumentChunk
-        
-        db = next(get_db())
-        
-        try:
-            # Get all users who have documents
-            users = db.query(AI_Document.admin_email).distinct().all()
-            
-            for (email,) in users:
-                print(f"Cleaning up for user: {email}")
-                
-                ai_assistant = AIAssistant(db)
-                
-                # Reset user collection
-                result = ai_assistant.reset_user_collection(email)
-                print(f"Reset result: {result}")
-                
-                # Reprocess all documents for this user
-                documents = db.query(AI_Document).filter(AI_Document.admin_email == email).all()
-                
-                for document in documents:
-                    if document.processed:
-                        print(f"Reprocessing document: {document.document_name}")
-                        
-                        # Extract text again
-                        try:
-                            text_content, _ = ai_assistant._extract_pdf_text(document.file_path)
-                            
-                            # Reprocess and store chunks
-                            ai_assistant._process_and_store_chunks(
-                                document.id, email, text_content, document.document_name
-                            )
-                            
-                            print(f"Successfully reprocessed: {document.document_name}")
-                        except Exception as e:
-                            print(f"Error reprocessing {document.document_name}: {e}")
-            
-            print("Database sync completed")
-            
-        except Exception as e:
-            print(f"Error during sync: {e}")
-        finally:
-            db.close()
-
-    def quick_reset_chroma():
-        """Quick reset - deletes ChromaDB and recreates empty structure."""
-        import os
-        import shutil
-        
-        chroma_path = "./chroma_db"
-        
-        print("Stopping application first...")
-        
-        # Delete ChromaDB directory
-        if os.path.exists(chroma_path):
-            try:
-                shutil.rmtree(chroma_path)
-                print(f"✅ Deleted ChromaDB directory: {chroma_path}")
-            except Exception as e:
-                print(f"❌ Error deleting directory: {e}")
-                return False
-        
-        # Recreate directory
-        try:
-            os.makedirs(chroma_path, exist_ok=True)
-            print(f"✅ Created new ChromaDB directory: {chroma_path}")
-            
-            # Test initialization
-            import chromadb
-            from chromadb.config import Settings
-            
-            client = chromadb.PersistentClient(
-                path=chroma_path,
-                settings=Settings(anonymized_telemetry=False)
-            )
-            
-            print("✅ ChromaDB initialized successfully")
-            print("🔄 Restart your application to begin fresh")
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error creating new ChromaDB: {e}")
-            return False
-    
-    def verify_knowledge_base_consistency(self, email: str) -> dict:
-        """
-        Verify the consistency between application database and vector store
-        
-        Args:
-            email: Admin email to check documents for
-            
-        Returns:
-            Dict containing consistency check results
-        """
-        try:
-            # Get all documents from application database
-            db_documents = (self.db.query(AI_Document)
-                    .filter((AI_Document.admin_email == email) | (AI_Document.is_public == True))
-                    .all())
-            db_document_ids = set(str(document.id) for document in db_documents)
-            
-            # Get all chunks from database
-            db_chunks = (self.db.query(AI_DocumentChunk)
-                        .join(AI_Document)
-                        .filter((AI_Document.admin_email == email) | (AI_Document.is_public == True))
-                        .all())
-            chunk_document_ids = set(str(chunk.document_id) for chunk in db_chunks)
-            
-            # Get embeddings from vector store using get_or_create_collection
-            collection = self.get_or_create_collection(email)
-            vector_ids = set()
-            if collection is not None:
-                all_vectors = collection.get()
-                if all_vectors and all_vectors['ids']:
-                    vector_ids = set(str(id) for id in all_vectors['ids'])
-            
-            # Check consistency
-            is_consistent = (db_document_ids == chunk_document_ids) and all(
-                chunk.embedding_id in vector_ids for chunk in db_chunks if chunk.embedding_id
-            )
-            
-            return {
-                "is_consistent": is_consistent,
-                "database_documents": len(db_document_ids),
-                "chunk_documents": len(chunk_document_ids),
-                "vector_count": len(vector_ids)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error checking consistency: {e}")
-            raise AIAssistantError(f"Failed to verify consistency: {e}")
     def delete_documents(self, email: str, document_ids: List[str]) -> int:
         """
         Delete documents and their associated data
