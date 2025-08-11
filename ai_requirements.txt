@@ -10,7 +10,5 @@ python-dotenv
 psycopg2-binary
 openai
 chromadb
-sentence-transformers
 PyPDF2
-nltk
 pydantic[email]

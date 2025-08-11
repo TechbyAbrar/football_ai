@@ -11,14 +11,10 @@ import hashlib
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 from openai._client import OpenAI
-from sentence_transformers.SentenceTransformer import SentenceTransformer
 import chromadb
 from chromadb.config import Settings
 from chromadb.api.models.Collection import Collection
 from PyPDF2._reader import PdfReader
-import nltk
-from nltk.tokenize import sent_tokenize, word_tokenize
-from nltk.corpus import stopwords
 import re
 from dotenv.main import load_dotenv
 from app.database import get_user_full_name
@@ -30,19 +26,6 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Download required NLTK data
-try:
-    nltk.data.find('tokenizers/punkt')
-    nltk.download('punkt_tab')
-except LookupError:
-    nltk.download('punkt')
-    
-
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
 
 class AIAssistantError(Exception):
     """Custom exception for AI Assistant errors"""
@@ -77,12 +60,12 @@ class AIAssistant:
             logger.error(f"Failed to initialize OpenAI client: {e}")
             raise AIAssistantError(f"Failed to initialize OpenAI client. Please check your API key: {e}")
         
-        # Initialize sentence transformer for embeddings
-        try:
-            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
-            raise AIAssistantError(f"Failed to initialize embedding model: {e}")
+        # OpenAI embeddings configuration
+        self.embedding_model_name = "text-embedding-3-small"  # More cost-effective than text-embedding-3-large
+        
+        # OpenAI chat model configuration - using lighter, faster model for better performance
+        self.chat_model_name = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")  # Default to fast, cost-effective model
+        logger.info(f"Using chat model: {self.chat_model_name}")
         
         # Initialize ChromaDB client
         try:
@@ -98,15 +81,45 @@ class AIAssistant:
         self.upload_dir = "uploads"
         os.makedirs(self.upload_dir, exist_ok=True)
 
+    def _simple_sentence_tokenize(self, text: str) -> List[str]:
+        """
+        Lightweight sentence tokenizer - replaces NLTK for better performance.
+        Uses regex patterns to split sentences on common punctuation.
+        """
+        # Clean up whitespace first
+        text = re.sub(r'\s+', ' ', text.strip())
+        
+        # Split on sentence-ending punctuation followed by space and capital letter
+        # This handles most cases without the overhead of NLTK
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+        
+        # Filter out very short sentences (likely fragments)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+        
+        return sentences
+
     def _get_cache_key(self, prefix: str) -> str:
         """Generate cache key with hourly refresh."""
         return f"{prefix}_{datetime.now().hour}"
+    
+    def _get_openai_embedding(self, text: str) -> List[float]:
+        """Generate embeddings using OpenAI API."""
+        try:
+            response = self.openai_client.embeddings.create(
+                model=self.embedding_model_name,
+                input=text,
+                encoding_format="float"
+            )
+            return response.data[0].embedding
+        except Exception as e:
+            logger.error(f"Error generating OpenAI embedding: {e}")
+            raise AIAssistantError(f"Failed to generate embedding: {e}")
     
     def _get_cached_embedding(self, text: str) -> List[float]:
         """Cache embeddings to avoid recomputation."""
         text_hash = hashlib.md5(text.encode()).hexdigest()
         if text_hash not in self._embedding_cache:
-            self._embedding_cache[text_hash] = self.embedding_model.encode(text).tolist()
+            self._embedding_cache[text_hash] = self._get_openai_embedding(text)
         return self._embedding_cache[text_hash]
     
     def _get_cached_documents(self) -> List[AI_Document]:
@@ -295,8 +308,8 @@ class AIAssistant:
                             "is_public": "true"  # Mark all documents as public
                         }
                         
-                        # Get embedding
-                        embedding = self.embedding_model.encode(chunk_text).tolist()
+                        # Get embedding using OpenAI
+                        embedding = self._get_openai_embedding(chunk_text)
                         
                         # Append to batch lists
                         chunk_embeddings.append(embedding)
@@ -362,8 +375,8 @@ class AIAssistant:
                 if not page_text:
                     continue
                 
-                # Split page text into sentences for better chunk boundaries
-                sentences = sent_tokenize(page_text)
+                # Split page text into sentences using lightweight tokenizer
+                sentences = self._simple_sentence_tokenize(page_text)
                 
                 current_chunk = ""
                 for sentence in sentences:
@@ -388,7 +401,7 @@ class AIAssistant:
         
         # If no page markers found, split the entire text
         if not chunks:
-            sentences = sent_tokenize(text_content)
+            sentences = self._simple_sentence_tokenize(text_content)
             current_chunk = ""
             
             for sentence in sentences:
@@ -498,8 +511,8 @@ class AIAssistant:
                                     if not chunk_text.strip():
                                         continue
                                     
-                                    # Generate embedding
-                                    embedding = self.embedding_model.encode(chunk_text).tolist()
+                                    # Generate embedding using OpenAI
+                                    embedding = self._get_openai_embedding(chunk_text)
                                     
                                     # Create metadata
                                     metadata = {
@@ -715,7 +728,7 @@ class AIAssistant:
             
             # Generate response using OpenAI
             response = self.openai_client.chat.completions.create(
-                model="gpt-4-turbo-preview",  # Using GPT-4 for better responses
+                model=self.chat_model_name,  # Using configurable lightweight model for better performance
                 messages=messages,
                 max_tokens=1200,  # Reduced from 1500 for faster responses
                 temperature=0.7
