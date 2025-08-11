@@ -77,7 +77,7 @@ def get_user_full_name(email: str):
     db = SessionLocal()
     try:
         result = db.execute(
-            text("SELECT full_name FROM account_userauth WHERE email = :email"),
+            text("SELECT full_name FROM account_userauth WHERE email = :email AND is_verified = TRUE"),
             {"email": email}
         ).first()
         
