@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 class AIAssistantError(Exception):
     """Custom exception for AI Assistant errors"""
     pass
+    pass
 
 class AIAssistant:
     def __init__(self, db_session: Session) -> None:
@@ -130,6 +131,78 @@ class AIAssistant:
                 AI_Document.is_public == True
             ).all()
         return self._document_cache[cache_key]
+
+    def _needs_document_context(self, query: str) -> bool:
+        """
+        Intelligent query classification to determine if vector database retrieval is needed.
+        Returns True if the query requires document context, False for simple/general queries.
+        """
+        query_lower = query.lower().strip()
+        
+        # Simple queries that don't need document context
+        simple_patterns = [
+            # Greetings and basic interactions
+            r'^(hi|hello|hey|good morning|good afternoon|good evening)',
+            r'^(thanks|thank you|thx)',
+            r'^(bye|goodbye|see you)',
+            r'^(how are you|what\'s up)',
+            
+            # Meta questions about the system
+            r'(who are you|what are you|what can you do)',
+            r'(how does this work|how do you work)',
+            r'(what is this|what is your purpose)',
+            
+            # Very general football questions (can answer without specific documents)
+            r'^(what is football|what is soccer)',
+            r'^(how many players|how long is a match)',
+            r'^(what are the rules|basic rules)',
+            
+            # System/technical queries
+            r'(help|assistance|support)',
+            r'(error|problem|issue)',
+        ]
+        
+        # Check if query matches simple patterns
+        import re
+        for pattern in simple_patterns:
+            if re.search(pattern, query_lower):
+                return False
+        
+        # Football-specific keywords that usually need document context
+        football_context_keywords = [
+            'nutrition', 'diet', 'eating', 'food', 'meal', 'supplement',
+            'training', 'exercise', 'workout', 'conditioning', 'strength',
+            'injury', 'prevention', 'recovery', 'rehabilitation', 'pain',
+            'tactical', 'strategy', 'formation', 'technique', 'skill',
+            'mental', 'psychology', 'motivation', 'confidence', 'pressure',
+            'performance', 'analysis', 'data', 'statistics', 'metrics',
+            'coaching', 'development', 'youth', 'academy', 'program',
+            'specific', 'detailed', 'explain', 'recommend', 'best practice'
+        ]
+        
+        # Check if query contains football-specific keywords
+        for keyword in football_context_keywords:
+            if keyword in query_lower:
+                return True
+        
+        # Questions that typically need specific information
+        question_patterns = [
+            r'(what should|what is the best|how to|how do|when to|why)',
+            r'(recommend|suggestion|advice|guideline|protocol)',
+            r'(specific|detailed|in-depth|comprehensive)',
+            r'(study|research|evidence|scientific)',
+        ]
+        
+        for pattern in question_patterns:
+            if re.search(pattern, query_lower):
+                return True
+        
+        # If query is very short (likely simple), don't retrieve
+        if len(query.split()) <= 3:
+            return False
+        
+        # Default: retrieve context for safety (better to over-retrieve than under-retrieve)
+        return True
 
     def get_or_create_collection(self, email: str) -> Collection:
         """Get or create ChromaDB collections for a user.
@@ -655,17 +728,27 @@ class AIAssistant:
                 AI_ChatMessage.session_id == session_id
             ).order_by(AI_ChatMessage.timestamp.desc()).limit(3).all()
             
-            # Retrieve relevant context from all books - reduced from 15 to 8 for better performance
-            relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=8)
+            # Intelligent query classification - only retrieve from vector DB when needed
+            needs_context = self._needs_document_context(query_text)
             
-            # If no relevant chunks found, return a message indicating no documents
-            if not relevant_chunks:
-                return "I cannot provide an answer as there are no documents in the knowledge base yet. Please upload some documents first."
-            
-            # Build context from chunks
-            context_text, references = self._build_context_from_chunks(relevant_chunks)
-            
-            system_prompt = f"""
+            if needs_context:
+                # Retrieve relevant context from all books - reduced from 15 to 8 for better performance
+                relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=8)
+                
+                # If no relevant chunks found, return a message indicating no documents
+                if not relevant_chunks:
+                    return "I cannot provide an answer as there are no documents in the knowledge base yet. Please upload some documents first."
+                
+                # Build context from chunks
+                context_text, references = self._build_context_from_chunks(relevant_chunks)
+            else:
+                # Skip vector retrieval for simple queries
+                relevant_chunks = None
+                context_text = ""
+                references = []
+            # Create different prompts based on whether we need document context
+            if needs_context and relevant_chunks:
+                system_prompt = f"""
             You are a highly specialized Football Intelligence Assistant. You are trained solely on a knowledge base made from uploaded scientific PDFs and expert-authored football resources. You do not use any external data or assumptions.
             Your are currently talking to {self.user_full_name if self.user_full_name else 'User'}.
             Your role is to respond accurately, clearly, and professionally to user questions across these domains:
@@ -709,19 +792,24 @@ class AIAssistant:
             # Add conversation history to messages (last 4 messages instead of 6)
             messages.extend(conversation_history[:4])
             
-            # Add current query with context
-            user_message = f"""User Query: {query_text}
+            # Create different user messages based on context needs
+            if needs_context and relevant_chunks:
+                # Add current query with context
+                user_message = f"""User Query: {query_text}
 
-            Below are the retrieved document excerpts you MUST rely on for answering:
+                Below are the retrieved document excerpts you MUST rely on for answering:
 
-            {context_text}
+                {context_text}
 
-            Instructions:
-            - Use ONLY these sources.
-            - DO NOT assume anything beyond them.
-            - Cite precisely as: [Document Title | Category | Page X]
-            - If information is insufficient, respond with the fallback message.
-            """
+                Instructions:
+                - Use ONLY these sources.
+                - DO NOT assume anything beyond them.
+                - Cite precisely as: [Document Title | Category | Page X]
+                - If information is insufficient, respond with the fallback message.
+                """
+            else:
+                # For simple queries, just use the query text directly
+                user_message = query_text
 
 
             messages.append({"role": "user", "content": user_message})
