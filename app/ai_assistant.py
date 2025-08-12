@@ -645,29 +645,205 @@ class AIAssistant:
             logger.error(f"Error retrieving context: {e}")
             raise AIAssistantError(f"Failed to retrieve context: {e}")
     
+    def get_retrieval_stats(self, email: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get statistics about retrieval decisions for monitoring and optimization.
+        This can help tune the retrieval logic over time.
+        """
+        try:
+            # This would ideally track retrieval decisions in the database
+            # For now, return basic stats about the knowledge base
+            document_count = self.db.query(AI_Document).filter(AI_Document.is_public == True).count()
+            chunk_count = self.db.query(AI_DocumentChunk).count()
+            
+            # Get recent message count for context
+            recent_messages = self.db.query(AI_ChatMessage)
+            if session_id:
+                recent_messages = recent_messages.filter(AI_ChatMessage.session_id == session_id)
+            recent_count = recent_messages.count()
+            
+            return {
+                "knowledge_base": {
+                    "document_count": document_count,
+                    "chunk_count": chunk_count
+                },
+                "conversation": {
+                    "recent_messages": recent_count
+                },
+                "retrieval_patterns": {
+                    "conversational_threshold": 3,  # words or less typically conversational
+                    "factual_keywords": ["training", "nutrition", "injury", "performance", "tactics"],
+                    "follow_up_keywords": ["tell me more", "continue", "explain", "clarify"]
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error getting retrieval stats: {e}")
+            return {"error": str(e)}
+
+    def _should_use_document_retrieval(self, query_text: str, previous_messages: List, email: str) -> Dict[str, Any]:
+        """
+        Enhanced heuristic to determine if document retrieval is necessary.
+        Returns a dictionary with decision and reasoning.
+        """
+        query_lower = query_text.lower().strip()
+        
+        # Define patterns that typically don't need document retrieval
+        conversational_patterns = [
+            # Greetings and social interactions
+            r'\b(hi|hello|hey|good morning|good afternoon|good evening|thanks|thank you|bye|goodbye)\b',
+            # Simple confirmations and clarifications
+            r'\b(yes|no|ok|okay|sure|alright|understood|got it|i see)\b',
+            # Meta questions about the assistant
+            r'\b(who are you|what can you do|how do you work|what is your purpose)\b'
+        ]
+        
+        follow_up_patterns = [
+            # Direct follow-ups
+            r'\b(tell me more|go on|continue|what next|explain further|elaborate|more details)\b',
+            # Clarification requests
+            r'\b(what do you mean|can you clarify|i don\'t understand|explain that|what does that mean)\b',
+            # Referential questions
+            r'\b(about that|regarding this|on this topic|this point|the previous|what you said)\b'
+        ]
+        
+        # Questions that typically need document retrieval
+        factual_patterns = [
+            # Specific football-related queries
+            r'\b(training|nutrition|injury|prevention|recovery|performance|tactics|analysis)\b',
+            # Research/data questions
+            r'\b(study|research|evidence|data|statistics|findings|results)\b',
+            # How-to questions
+            r'\b(how to|how do|what is the best way|recommended|guidelines|protocol)\b'
+        ]
+        
+        # Check for conversational patterns first
+        for pattern in conversational_patterns:
+            if re.search(pattern, query_lower):
+                return {
+                    "retrieve": False,
+                    "reason": "conversational_query",
+                    "confidence": 0.9
+                }
+        
+        # Check if this is a follow-up to recent conversation
+        if previous_messages:
+            last_ai_response = previous_messages[0].response_text.lower()
+            
+            # Check for follow-up patterns
+            for pattern in follow_up_patterns:
+                if re.search(pattern, query_lower):
+                    return {
+                        "retrieve": False,
+                        "reason": "follow_up_query",
+                        "confidence": 0.8
+                    }
+            
+            # Check if query references something from recent AI response
+            query_words = set(query_lower.split())
+            response_words = set(last_ai_response.split())
+            
+            # If significant word overlap and query is short, likely a follow-up
+            overlap = len(query_words.intersection(response_words))
+            if len(query_words) <= 5 and overlap >= 2:
+                return {
+                    "retrieve": False,
+                    "reason": "contextual_follow_up",
+                    "confidence": 0.7
+                }
+            
+            # Check for pronoun references that suggest continuation
+            pronouns = ['it', 'this', 'that', 'they', 'them', 'these', 'those']
+            if any(pronoun in query_words for pronoun in pronouns):
+                return {
+                    "retrieve": False,
+                    "reason": "pronoun_reference",
+                    "confidence": 0.6
+                }
+        
+        # Check for queries that definitely need retrieval
+        for pattern in factual_patterns:
+            if re.search(pattern, query_lower):
+                return {
+                    "retrieve": True,
+                    "reason": "factual_query",
+                    "confidence": 0.9
+                }
+        
+        # Default behavior based on query complexity
+        word_count = len(query_text.split())
+        
+        # Very short queries might be conversational
+        if word_count <= 3:
+            return {
+                "retrieve": False,
+                "reason": "very_short_query",
+                "confidence": 0.6
+            }
+        
+        # Medium to long queries likely need retrieval
+        if word_count >= 5:
+            return {
+                "retrieve": True,
+                "reason": "substantial_query",
+                "confidence": 0.7
+            }
+        
+        # Default to retrieval for safety
+        return {
+            "retrieve": True,
+            "reason": "default_safety",
+            "confidence": 0.5
+        }
 
     def process_message(self, session_id: str, query_text: str, email: str) -> str:
         try:
-            # Set users full name
             self.user_full_name = get_user_full_name(email)
-            # Get conversation history - reduced from 5 to 3 for better performance
+
+            # Get recent conversation history
             previous_messages = self.db.query(AI_ChatMessage).filter(
                 AI_ChatMessage.session_id == session_id
             ).order_by(AI_ChatMessage.timestamp.desc()).limit(3).all()
+
+            # Enhanced retrieval decision
+            retrieval_decision = self._should_use_document_retrieval(query_text, previous_messages, email)
+            retrieval_needed = retrieval_decision["retrieve"]
             
-            # Retrieve relevant context from all books - reduced from 15 to 8 for better performance
-            relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=8)
-            
-            # If no relevant chunks found, return a message indicating no documents
-            if not relevant_chunks:
-                return "I cannot provide an answer as there are no documents in the knowledge base yet. Please upload some documents first."
-            
-            # Build context from chunks
-            context_text, references = self._build_context_from_chunks(relevant_chunks)
-            
+            # Log the decision for debugging/monitoring
+            logger.info(f"Retrieval decision: {retrieval_decision['reason']} "
+                       f"(confidence: {retrieval_decision['confidence']}, retrieve: {retrieval_needed})")
+
+            # Retrieve context only if needed
+            relevant_chunks = []
+            if retrieval_needed:
+                relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=8)
+
+            # Handle case where retrieval was needed but no documents found
+            if retrieval_needed and not relevant_chunks:
+                # Check if there are any documents at all
+                document_count = self.db.query(AI_Document).filter(AI_Document.is_public == True).count()
+                if document_count == 0:
+                    return "I cannot provide an answer as there are no documents in the knowledge base yet. Please upload some documents first."
+                else:
+                    return "I couldn't find relevant information in the current documents for your specific question. You might want to try rephrasing your question or upload additional documents that cover this topic."
+
+            # Build context if we have chunks
+            context_text, references = ("", [])
+            if relevant_chunks:
+                context_text, references = self._build_context_from_chunks(relevant_chunks)
+
+            # Enhanced system prompt that considers retrieval context
+            retrieval_context = ""
+            if retrieval_needed and context_text:
+                retrieval_context = "You have access to relevant document excerpts that you MUST use as your primary source of information."
+            elif not retrieval_needed:
+                retrieval_context = "This appears to be a conversational query that doesn't require document retrieval. You can respond based on the conversation context and general assistant capabilities, but still prioritize any football knowledge from previous exchanges in this conversation."
+
             system_prompt = f"""
             You are a highly specialized Football Intelligence Assistant. You are trained solely on a knowledge base made from uploaded scientific PDFs and expert-authored football resources. You do not use any external data or assumptions.
             Your are currently talking to {self.user_full_name if self.user_full_name else 'User'}.
+            
+            {retrieval_context}
+            
             Your role is to respond accurately, clearly, and professionally to user questions across these domains:
 
             1. Nutrition
@@ -693,54 +869,166 @@ class AIAssistant:
             Respond professionally. Always keep the user’s role (coach, player, analyst) in mind if mentioned.
             """
 
-
-
-            # Prepare messages for OpenAI
             messages = [{"role": "system", "content": system_prompt}]
-            
-            # Create conversation history using a proper loop - reduced to last 4 messages for performance
+
+            # Add conversation history
             conversation_history = []
             for msg in reversed(previous_messages):
                 conversation_history.extend([
                     {"role": "user", "content": msg.query_text},
                     {"role": "assistant", "content": msg.response_text}
                 ])
-            
-            # Add conversation history to messages (last 4 messages instead of 6)
             messages.extend(conversation_history[:4])
-            
-            # Add current query with context
-            user_message = f"""User Query: {query_text}
 
-            Below are the retrieved document excerpts you MUST rely on for answering:
+            # Add current query with or without retrieval context
+            if context_text:
+                user_message = f"""User Query: {query_text}
 
-            {context_text}
+Below are the retrieved document excerpts you MUST rely on for answering:
 
-            Instructions:
-            - Use ONLY these sources.
-            - DO NOT assume anything beyond them.
-            - Cite precisely as: [Document Title | Category | Page X]
-            - If information is insufficient, respond with the fallback message.
-            """
+{context_text}
 
+Instructions:
+- Use ONLY these sources.
+- DO NOT assume anything beyond them.
+- Cite precisely as: [Document Title | Category | Page X]
+- If information is insufficient, respond with the fallback message.
+"""
+            else:
+                # For non-retrieval queries, provide context about the conversation flow
+                conversation_context = ""
+                if previous_messages and not retrieval_needed:
+                    last_exchange = f"Previous context: User asked '{previous_messages[0].query_text}' and you responded with relevant information."
+                    conversation_context = f"\n\nConversation context:\n{last_exchange}\n"
+                
+                user_message = f"""User Query: {query_text}{conversation_context}
+
+Instructions for this {'conversational' if not retrieval_needed else 'general'} query:
+- Respond naturally and helpfully
+- If referring to football concepts, maintain accuracy but you don't need document citations for general conversation
+- If the user asks for specific football information that would require documents, suggest they rephrase for a more specific search
+"""
 
             messages.append({"role": "user", "content": user_message})
-            
-            # Generate response using OpenAI
+
+            # Adjust model parameters based on query type
+            max_tokens = 1200 if retrieval_needed else 800  # Shorter responses for conversational queries
+            temperature = 0.7 if retrieval_needed else 0.8  # Slightly more creative for conversation
+
             response = self.openai_client.chat.completions.create(
-                model=self.chat_model_name,  # Using configurable lightweight model for better performance
+                model=self.chat_model_name,
                 messages=messages,
-                max_tokens=1200,  # Reduced from 1500 for faster responses
-                temperature=0.7
+                max_tokens=max_tokens,
+                temperature=temperature
             )
             
             ai_response = response.choices[0].message.content
             
+            # Log response characteristics for monitoring
+            logger.info(f"Response generated - Retrieval used: {retrieval_needed}, "
+                       f"Context chunks: {len(relevant_chunks)}, Response length: {len(ai_response)}")
+                       
             return ai_response
-            
+
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             raise AIAssistantError(f"Failed to process message: {e}")
+
+    # def process_message(self, session_id: str, query_text: str, email: str) -> str:
+    #     try:
+    #         # Set users full name
+    #         self.user_full_name = get_user_full_name(email)
+    #         # Get conversation history - reduced from 5 to 3 for better performance
+    #         previous_messages = self.db.query(AI_ChatMessage).filter(
+    #             AI_ChatMessage.session_id == session_id
+    #         ).order_by(AI_ChatMessage.timestamp.desc()).limit(3).all()
+            
+    #         # Retrieve relevant context from all books - reduced from 15 to 8 for better performance
+    #         relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=8)
+            
+    #         # If no relevant chunks found, return a message indicating no documents
+    #         if not relevant_chunks:
+    #             return "I cannot provide an answer as there are no documents in the knowledge base yet. Please upload some documents first."
+            
+    #         # Build context from chunks
+    #         context_text, references = self._build_context_from_chunks(relevant_chunks)
+            
+    #         system_prompt = f"""
+    #         You are a highly specialized Football Intelligence Assistant. You are trained solely on a knowledge base made from uploaded scientific PDFs and expert-authored football resources. You do not use any external data or assumptions.
+    #         Your are currently talking to {self.user_full_name if self.user_full_name else 'User'}.
+    #         Your role is to respond accurately, clearly, and professionally to user questions across these domains:
+
+    #         1. Nutrition
+    #         2. Strength & Conditioning
+    #         3. Training Program Scheduling
+    #         4. General Player Advice
+    #         5. Injury Prevention & Management
+    #         6. Mental Well-Being
+    #         7. Performance Analytics
+    #         8. Tactical Development
+    #         9. General Summaries
+
+    #         Follow these strict rules:
+
+    #         1. DO NOT use external football knowledge — ONLY the provided document excerpts.
+    #         2. NEVER guess or assume — if unsure, say:
+    #         "I cannot provide specific information about this topic from the available football documents. Please check other reliable sources or consult with qualified professionals."
+    #         3. Provide citations for all key facts in this format: [Document Title | Category | Page X]
+    #         4. If multiple domains apply, structure the response per domain.
+    #         5. Prioritize actionable advice (e.g., routines, checklists, examples).
+    #         6. Maintain a balance of clarity and scientific accuracy.
+
+    #         Respond professionally. Always keep the user’s role (coach, player, analyst) in mind if mentioned.
+    #         """
+
+
+
+    #         # Prepare messages for OpenAI
+    #         messages = [{"role": "system", "content": system_prompt}]
+            
+    #         # Create conversation history using a proper loop - reduced to last 4 messages for performance
+    #         conversation_history = []
+    #         for msg in reversed(previous_messages):
+    #             conversation_history.extend([
+    #                 {"role": "user", "content": msg.query_text},
+    #                 {"role": "assistant", "content": msg.response_text}
+    #             ])
+            
+    #         # Add conversation history to messages (last 4 messages instead of 6)
+    #         messages.extend(conversation_history[:4])
+            
+    #         # Add current query with context
+    #         user_message = f"""User Query: {query_text}
+
+    #         Below are the retrieved document excerpts you MUST rely on for answering:
+
+    #         {context_text}
+
+    #         Instructions:
+    #         - Use ONLY these sources.
+    #         - DO NOT assume anything beyond them.
+    #         - Cite precisely as: [Document Title | Category | Page X]
+    #         - If information is insufficient, respond with the fallback message.
+    #         """
+
+
+    #         messages.append({"role": "user", "content": user_message})
+            
+    #         # Generate response using OpenAI
+    #         response = self.openai_client.chat.completions.create(
+    #             model=self.chat_model_name,  # Using configurable lightweight model for better performance
+    #             messages=messages,
+    #             max_tokens=1200,  # Reduced from 1500 for faster responses
+    #             temperature=0.7
+    #         )
+            
+    #         ai_response = response.choices[0].message.content
+            
+    #         return ai_response
+            
+    #     except Exception as e:
+    #         logger.error(f"Error processing message: {e}")
+    #         raise AIAssistantError(f"Failed to process message: {e}")
 
     def reset_user_collection(self, email: str) -> Dict[str, Any]:
         """Reset/clear all vectors for the public collection."""
