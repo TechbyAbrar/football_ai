@@ -342,37 +342,11 @@ async def get_all_sessions(
     db: Session = Depends(get_db)
 ) -> SessionsByDateResponse:
     """
-
-
-
-
     Get all sessions for a specific user, grouped by date.
-
-
-
-
-
     Args:
-
-
-
-
         email: Email address to get sessions for
-
-
-
-
         db: Database session
-
-
-
-
-
     Returns:
-
-
-
-
         SessionsByDateResponse with sessions grouped by date
     """
 
@@ -729,7 +703,7 @@ async def delete_session_chats(
     db: Session = Depends(get_db)
 ):
     """
-    Delete all chat messages from a specific session.
+    Delete all chat messages from a specific session and the session itself.
     """
     try:
         # 1️⃣ Check if user exists
@@ -752,14 +726,17 @@ async def delete_session_chats(
             )
 
         # 3️⃣ Delete all messages in the session
-        deleted_count = db.query(AI_ChatMessage).filter(
+        deleted_messages_count = db.query(AI_ChatMessage).filter(
             AI_ChatMessage.session_id == request.session_id
         ).delete()
+
+        # 4️⃣ Delete the session itself
+        db.delete(session)
         db.commit()
 
         return {
             "success": True,
-            "message": f"Deleted {deleted_count} messages from session {request.session_id}"
+            "message": f"Deleted {deleted_messages_count} messages and session {request.session_id}"
         }
 
     except HTTPException:
