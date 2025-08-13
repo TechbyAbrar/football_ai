@@ -74,7 +74,7 @@ class AIAssistant:
         self.embedding_model_name = "text-embedding-3-small"  # More cost-effective than text-embedding-3-large
         
         # OpenAI chat model configuration - using lighter, faster model for better performance
-        self.chat_model_name = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")  # Default to fast, cost-effective model
+        self.chat_model_name = os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1-nano")  # Default to fast, cost-effective model
         logger.info(f"Using chat model: {self.chat_model_name}")
         
         # Initialize ChromaDB client
@@ -865,7 +865,6 @@ class AIAssistant:
 
             ✅ I'll only share information from our trusted football knowledge base - no guesswork, just reliable insights
             ✅ If I don't have specific information, I'll be honest and suggest: "I don't have that specific information in our current football resources. I'd recommend consulting with qualified professionals or seeking additional expert sources."
-            ✅ I'll always cite my sources clearly: [Document Title | Category | Page X]
             ✅ I'll organize complex topics clearly so you can easily follow along
             ✅ I'll focus on giving you practical, actionable advice you can actually use
             ✅ I'll balance scientific accuracy with clear, understandable explanations
@@ -891,7 +890,6 @@ I've found some relevant information from our football knowledge base to help an
 
 Please provide a comprehensive, helpful response that:
 - Draws from these specific sources
-- Includes clear citations: [Document Title | Category | Page X]
 - Focuses on practical, actionable guidance
 - Shows genuine care for the user's football development
 """
@@ -912,7 +910,7 @@ This seems like a great moment for natural conversation! Please respond with:
 - Warmth and genuine engagement
 - Reference recent conversation topics when relevant
 - Helpful, supportive tone
-- Football knowledge when relevant (but citations aren't needed for casual chat)
+- Football knowledge when relevant
 - If they need specific technical information, gently guide them to ask more detailed questions
 """
 
