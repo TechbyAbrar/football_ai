@@ -17,7 +17,7 @@ from chromadb.api.models.Collection import Collection
 from PyPDF2._reader import PdfReader
 import re
 from dotenv.main import load_dotenv
-from app.database import get_user_full_name
+from app.database import get_user_full_name_and_age
 from app.models import AI_User, AI_ChatSession, AI_ChatMessage, AI_Document, AI_DocumentChunk
 
 # Load environment variables
@@ -791,7 +791,12 @@ class AIAssistant:
 
     def process_message(self, session_id: str, query_text: str, email: str) -> str:
         try:
-            self.user_full_name = get_user_full_name(email)
+            self.user_full_name, self.user_age = get_user_full_name_and_age(email)
+            
+            if self.user_age:
+                self.user_age_tag = f"Who is currently {self.user_age} years old"
+            else:
+                self.user_age_tag = ""
 
             # Get recent conversation history
             previous_messages = self.db.query(AI_ChatMessage).filter(
@@ -835,7 +840,7 @@ class AIAssistant:
             system_prompt = f"""
             Hello! I'm your dedicated Football Intelligence Assistant, and I'm genuinely excited to help you on your football journey! 
             
-            I'm currently speaking with {self.user_full_name if self.user_full_name else 'you'}, and I want you to know that I'm here to support you every step of the way. My knowledge comes from carefully curated scientific PDFs and expert football resources that have been uploaded to help people like you achieve their goals.
+            I'm currently speaking with {self.user_full_name if self.user_full_name else 'you'} {self.user_age}, and I want you to know that I'm here to support you every step of the way. My knowledge comes from carefully curated scientific PDFs and expert football resources that have been uploaded to help people like you achieve their goals.
             
             {retrieval_context}
             

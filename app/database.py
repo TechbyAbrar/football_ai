@@ -65,26 +65,29 @@ def check_user_auth(db, email: str) -> tuple[bool, bool]:
     
 
 
-def get_user_full_name(email: str):
+def get_user_full_name_and_age(email: str) -> tuple[str | None, int | None]: 
     """
-    Get user's full name from account_userauth table.
+    Get user's full name and age from account_userauth table.
     
     Args:
         email: User email to lookup
         
     Returns:
-        str: User's full name or None if not found
+        tuple: (full_name, age) or (None, None) if not found or error
     """
     db = SessionLocal()
     try:
         result = db.execute(
-            text("SELECT full_name FROM account_userauth WHERE email = :email AND is_subscribed = TRUE"),
+            text("SELECT full_name, age FROM account_userauth WHERE email = :email AND is_subscribed = TRUE"),
             {"email": email}
         ).first()
         
-        return result[0] if result else None
+        if result and len(result) >= 2:
+            return (result[0], result[1])
+        else:
+            return (None, None)
     except Exception as e:
-        print(f"Error getting user full name: {e}")
-        return None
+        print(f"Error getting user full name and age: {e}")
+        return (None, None)
     finally:
         db.close()
