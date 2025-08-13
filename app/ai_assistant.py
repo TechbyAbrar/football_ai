@@ -32,10 +32,20 @@ class AIAssistantError(Exception):
     pass
 
 class AIAssistant:
-    def __init__(self, db_session: Session) -> None:
+    def __init__(self, email, db_session: Session) -> None:
         """Initialize the AI Assistant."""
         self.db = db_session
         
+        #get name and age from email
+        self.user_full_name, self.user_age = get_user_full_name_and_age(email)
+            
+        if self.user_age:
+            self.user_age_tag = f"Who is currently {self.user_age} years old"
+        else:
+            self.user_age_tag = ""
+
+
+
         # Initialize caching for performance optimization
         self._document_cache = {}
         self._embedding_cache = {}
@@ -791,13 +801,7 @@ class AIAssistant:
 
     def process_message(self, session_id: str, query_text: str, email: str) -> str:
         try:
-            self.user_full_name, self.user_age = get_user_full_name_and_age(email)
             
-            if self.user_age:
-                self.user_age_tag = f"Who is currently {self.user_age} years old"
-            else:
-                self.user_age_tag = ""
-
             # Get recent conversation history
             previous_messages = self.db.query(AI_ChatMessage).filter(
                 AI_ChatMessage.session_id == session_id
@@ -814,12 +818,13 @@ class AIAssistant:
             # Retrieve context only if needed
             relevant_chunks = []
             if retrieval_needed:
-                relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=8)
+                relevant_chunks = self._retrieve_relevant_context(email, query_text, n_results=5)
 
             # Handle case where retrieval was needed but no documents found
             if retrieval_needed and not relevant_chunks:
-                # Check if there are any documents at all
-                document_count = self.db.query(AI_Document).filter(AI_Document.is_public == True).count()
+                # OPTIMIZATION: Use cached documents instead of separate count query
+                cached_docs = self._get_cached_documents()
+                document_count = len(cached_docs)
                 if document_count == 0:
                     return f"Hi {self.user_full_name if self.user_full_name else 'there'}! I'd love to help you with your football question, but we don't have any documents in our knowledge base yet. Once some football resources are uploaded, I'll be able to provide you with expert-backed insights and guidance!"
                 else:

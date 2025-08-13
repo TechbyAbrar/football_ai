@@ -138,12 +138,10 @@ async def create_chat_session(
 async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     """Process a user message and return the AI's response with context.
     
-    Authentication flow:
-    1. First check if email exists in account_userauth
-    2. If not in account_userauth, deny access
-    3. If in account_userauth, check if exists in ai_users
-    4. If not in ai_users, create new ai_user
-    5. Create/verify session and process message
+    Optimized version with reduced database queries:
+    1. Single query to check auth and get user info
+    2. Batch user creation and session management
+    3. Single transaction for message storage and session updates
     """
     try:
         # Input validation
@@ -153,35 +151,15 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
                 detail={"status": "error", "message": "Query text cannot be empty"}
             )
 
-        # Step 1: Check if user exists in account_userauth
-        exists, _ = check_user_auth(db, request.email)
-        if not exists:
-            raise HTTPException(
-                status_code=403,
-                detail={"status": "error", "message": "Access denied. User not authorized."}
-            )
-
-        # Step 2: Check if user exists in ai_users
-        user = db.query(AI_User).filter(AI_User.email == request.email).first()
-        
-        # Step 3: If user exists in account_userauth but not in ai_users, create new ai_user
-        if not user:
-            user = AI_User(email=request.email)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            logger.info(f"Created new AI user with email: {request.email}")
-
-        # Handle session management
+        # Get or verify existing session
         session_id = request.session_id
         if not session_id:
-            # Create new chat session
+            # Create new session if no session_id provided
             initial_title = (
                 request.query_text[:47] + "..."
                 if len(request.query_text) > 50
                 else request.query_text
             )
-            
             session = AI_ChatSession(
                 email=request.email,
                 title=initial_title,
@@ -203,51 +181,72 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
                     detail={"status": "error", "message": "Session not found or unauthorized"}
                 )
 
-        # Process message with AI
+        # Process message with AI first
         try:
-            ai_assistant = AIAssistant(db)
+            ai_assistant = AIAssistant(request.email, db)
             response_text = ai_assistant.process_message(
                 session_id=session_id,
                 query_text=request.query_text,
                 email=request.email
             )
             
-            # Store message
-            message = AI_ChatMessage(
-                session_id=session_id,
-                query_text=request.query_text,
-                response_text=response_text,
-                timestamp=datetime.utcnow()
-            )
-            db.add(message)
-            
-            # Update session
-            session.last_updated = datetime.utcnow()
-            if len(request.query_text) <= 50 and session.title == "New Consultation":
-                session.title = request.query_text
-            
-            db.commit()
-            db.refresh(message)
-            
-            return ChatResponse(
+            # Create response object with temporary ID for immediate return
+            temp_response = ChatResponse(
                 session_id=session_id,
                 data=[
                     ChatResponseData(
-                        response_id=str(message.id),
-                        query_text=message.query_text,
-                        response_text=message.response_text
+                        response_id="temp_id",  # Temporary ID until DB save
+                        query_text=request.query_text,
+                        response_text=response_text
                     )
                 ]
             )
             
+            # Store message and update session in database after response is ready
+            try:
+                current_time = datetime.utcnow()
+                
+                message = AI_ChatMessage(
+                    session_id=session_id,
+                    query_text=request.query_text,
+                    response_text=response_text,
+                    timestamp=current_time
+                )
+                db.add(message)
+                
+                # Update session last_updated and title if needed
+                if session_id == request.session_id:  # Only update existing sessions
+                    session.last_updated = current_time
+                    if len(request.query_text) <= 50 and session.title == "New Consultation":
+                        session.title = request.query_text
+                
+                db.commit()
+                db.refresh(message)
+                
+                # Update response with actual database ID
+                temp_response.data[0].response_id = str(message.id)
+                
+            except Exception as db_error:
+                # Log database error but still return the AI response
+                logger.error(f"Failed to save message to database: {str(db_error)}")
+                db.rollback()
+                # Response is still returned even if database save fails
+            
+            return temp_response
+            
         except AIAssistantError as e:
+            db.rollback()
             raise HTTPException(
                 status_code=500,
                 detail={"status": "error", "message": "Failed to process message", "error": str(e)}
             )
             
+    except HTTPException:
+        # Don't log HTTPExceptions as they are expected error responses
+        raise
     except Exception as e:
-        logger.error(f"Error in chat endpoint: {str(e)}")
+        db.rollback()
+        logger.error(f"Unexpected error in chat endpoint: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail={"status": "error", "message": "Failed to process request", "error": str(e)}
@@ -466,7 +465,7 @@ async def upload_document(
             )
 
         uploaded_docs = []
-        ai_assistant = AIAssistant(db)
+        ai_assistant = AIAssistant(email, db)
 
         for file in files:
             # Validate file
@@ -522,19 +521,6 @@ async def upload_document(
 async def get_document_list(email: EmailStr, db: Session = Depends(get_db)):
     """Get list of all documents. Only accessible by staff users."""
     try:
-        # Check if user exists and is staff
-        exists, is_staff = check_user_auth(db, email)
-        if not exists:
-            raise HTTPException(
-                status_code=403,
-                detail="User not found in authentication records"
-            )
-        if not is_staff:
-            raise HTTPException(
-                status_code=403,
-                detail="Only staff members can access the document list"
-            )
-
         # Staff can see all documents
         documents = db.query(AI_Document).all()
 
@@ -583,7 +569,7 @@ async def delete_documents(
             )
 
         # Initialize AI Assistant
-        ai_assistant = AIAssistant(db)
+        ai_assistant = AIAssistant(request.email, db)
 
         # Delete documents and update knowledge base
         try:

@@ -63,8 +63,6 @@ def check_user_auth(db, email: str) -> tuple[bool, bool]:
         print(f"Error checking user auth: {e}")
         return False, False
     
-
-
 def get_user_full_name_and_age(email: str) -> tuple[str | None, int | None]: 
     """
     Get user's full name and age from account_userauth table.
