@@ -59,6 +59,10 @@ class ChatResponseData(BaseModelWithConfig):
 
 class ChatResponse(BaseModelWithConfig):
     session_id: str
+    data: ChatResponseData
+
+class AllChatResponse(BaseModelWithConfig):
+    session_id: str
     data: List[ChatResponseData] = []
 
 class SessionInfo(BaseModelWithConfig):
@@ -193,13 +197,11 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             # Create response object with temporary ID for immediate return
             temp_response = ChatResponse(
                 session_id=session_id,
-                data=[
-                    ChatResponseData(
-                        response_id="temp_id",  # Temporary ID until DB save
-                        query_text=request.query_text,
-                        response_text=response_text
-                    )
-                ]
+                data=ChatResponseData(
+                    response_id="temp_id",  # Temporary ID until DB save
+                    query_text=request.query_text,
+                    response_text=response_text
+                )
             )
             
             # Store message and update session in database after response is ready
@@ -224,7 +226,7 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
                 db.refresh(message)
                 
                 # Update response with actual database ID
-                temp_response.data[0].response_id = str(message.id)
+                temp_response.data.response_id = str(message.id)
                 
             except Exception as db_error:
                 # Log database error but still return the AI response
@@ -257,7 +259,7 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 async def get_all_chat(
     session_id: str,
     db: Session = Depends(get_db)
-) -> ChatResponse:
+) -> AllChatResponse:
     """
 
 
@@ -323,7 +325,7 @@ async def get_all_chat(
             for msg in messages
         ]
 
-        return ChatResponse(session_id=session_id, data=data)
+        return AllChatResponse(session_id=session_id, data=data)
 
     except HTTPException:
         raise
