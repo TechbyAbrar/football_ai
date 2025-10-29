@@ -17,7 +17,7 @@ config = context.config
 # Override sqlalchemy.url with environment variable
 config.set_main_option("sqlalchemy.url", os.getenv(
     "DATABASE_URL",
-    "postgresql://neondb_owner:npg_pAfbwDcX06Ot@ep-curly-boat-a51gdo4s-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require"
+    "postgresql://backend_user:user_password@localhost:5432/backend_database"
 ))
 
 # Interpret the config file for Python logging.
