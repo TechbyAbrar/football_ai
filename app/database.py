@@ -47,18 +47,18 @@ def check_user_auth(db, email: str) -> tuple[bool, bool]:
         email: User email to check
         
     Returns:
-        tuple: (exists, is_staff)
+        tuple: (exists, is_subscribed)
     """
     try:
         result = db.execute(
-            text("SELECT email, is_staff FROM account_userauth WHERE email = :email"),
+            text("SELECT email, is_subscribed FROM account_userauth WHERE email = :email"),
             {"email": email}
         ).first()
         
         exists = bool(result)
-        is_staff = bool(result and result[1]) if exists else False
+        is_subscribed = bool(result and result[1]) if exists else False
         
-        return exists, is_staff
+        return exists, is_subscribed
     except Exception as e:
         print(f"Error checking user auth: {e}")
         return False, False
