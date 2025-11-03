@@ -154,8 +154,8 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             )
 
         # Step 1: Check if user exists in account_userauth
-        exists, _ = check_user_auth(db, request.email)
-        if not exists:
+        exists, is_subscribed = check_user_auth(db, request.email)
+        if not exists or not is_subscribed:
             raise HTTPException(
                 status_code=403,
                 detail={"status": "error", "message": "Access denied. User not authorized."}
@@ -461,16 +461,16 @@ async def upload_document(
     """Upload and process multiple documents. Only accessible by staff users."""
     try:
         # Check if user exists and is staff
-        exists, is_staff = check_user_auth(db, email)
+        exists, is_subscribed = check_user_auth(db, email)
         if not exists:
             raise HTTPException(
                 status_code=403,
                 detail="User not found in authentication records"
             )
-        if not is_staff:
+        if not is_subscribed:
             raise HTTPException(
                 status_code=403,
-                detail="Only staff members can upload documents"
+                detail="Only subscribed members can upload documents"
             )
 
         # Validate category if provided
@@ -549,16 +549,16 @@ async def get_document_list(email: EmailStr, db: Session = Depends(get_db)):
     """Get list of all documents. Only accessible by staff users."""
     try:
         # Check if user exists and is staff
-        exists, is_staff = check_user_auth(db, email)
+        exists, is_subscribed = check_user_auth(db, email)
         if not exists:
             raise HTTPException(
                 status_code=403,
                 detail="User not found in authentication records"
             )
-        if not is_staff:
+        if not is_subscribed:
             raise HTTPException(
                 status_code=403,
-                detail="Only staff members can access the document list"
+                detail="Only subscribed members can access the document list"
             )
 
         # Staff can see all documents
@@ -596,16 +596,16 @@ async def delete_documents(
     """Delete documents and their associated data. Only accessible by staff users."""
     try:
         # Check if user exists and is staff
-        exists, is_staff = check_user_auth(db, request.email)
+        exists, is_subscribed = check_user_auth(db, request.email)
         if not exists:
             raise HTTPException(
                 status_code=403,
                 detail="User not found in authentication records"
             )
-        if not is_staff:
+        if not is_subscribed:
             raise HTTPException(
                 status_code=403,
-                detail="Only staff members can delete documents"
+                detail="Only subscribed members can delete documents"
             )
 
         # Initialize AI Assistant
@@ -733,8 +733,8 @@ async def delete_session_chats(
     """
     try:
         # 1️⃣ Check if user exists
-        exists, _ = check_user_auth(db, request.email)
-        if not exists:
+        exists, is_subscribed = check_user_auth(db, request.email)
+        if not exists or not is_subscribed:
             raise HTTPException(
                 status_code=403,
                 detail="User not found"
