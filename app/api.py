@@ -260,37 +260,11 @@ async def get_all_chat(
     db: Session = Depends(get_db)
 ) -> ChatResponse:
     """
-
-
-
-
     Get all chat messages for a specific session.
-
-
-
-
-
     Args:
-
-
-
-
         session_id: The session ID to retrieve messages for
-
-
-
-
         db: Database session
-
-
-
-
-
     Returns:
-
-
-
-
         ChatResponse containing all messages in the session
     """
 
@@ -328,11 +302,8 @@ async def get_all_chat(
 
     except HTTPException:
         raise
-
     except Exception as e:
-
         logger.error(f"Error getting all chat: {str(e)}")
-
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -342,54 +313,23 @@ async def get_all_sessions(
     db: Session = Depends(get_db)
 ) -> SessionsByDateResponse:
     """
-
-
-
-
     Get all sessions for a specific user, grouped by date.
-
-
-
-
-
     Args:
-
-
-
-
         email: Email address to get sessions for
-
-
-
-
         db: Database session
-
-
-
-
-
     Returns:
-
-
-
 
         SessionsByDateResponse with sessions grouped by date
     """
-
     try:
-
         # Get current time for date calculations
 
         now = datetime.utcnow()
 
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
         yesterday_start = today_start - timedelta(days=1)
-
         week_start = today_start - timedelta(days=7)
-
         month_start = today_start - timedelta(days=30)
-
         year_start = today_start - timedelta(days=365)
 
         # Query all sessions for the user
@@ -420,31 +360,24 @@ async def get_all_sessions(
             )
 
             if session.created_at >= today_start:
-
                 grouped_sessions["today"].append(session_info)
 
             elif session.created_at >= yesterday_start:
-
                 grouped_sessions["yesterday"].append(session_info)
 
             elif session.created_at >= week_start:
-
                 grouped_sessions["last_week"].append(session_info)
 
             elif session.created_at >= month_start:
-
                 grouped_sessions["last_month"].append(session_info)
 
             elif session.created_at >= year_start:
-
                 grouped_sessions["last_year"].append(session_info)
 
         return SessionsByDateResponse(**grouped_sessions)
 
     except Exception as e:
-
         logger.error(f"Error getting all sessions: {str(e)}")
-
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -645,45 +578,14 @@ async def delete_documents(
 @app.get("/ai/search/")
 async def search_sessions(q: str, email: EmailStr, db: Session = Depends(get_db)):
     """
-
-
-
-
     Search sessions by title for a specific user.
-
-
-
-
-
     Args:
-
-
-
-
         q: Search query string
-
-
-
-
         email: User's email address
-
-
-
-
         db: Database session
-
-
-
-
-
     Returns:
-
-
-
-
         List of matching sessions
     """
-
     try:
 
         sessions = (
@@ -755,11 +657,14 @@ async def delete_session_chats(
         deleted_count = db.query(AI_ChatMessage).filter(
             AI_ChatMessage.session_id == request.session_id
         ).delete()
+        
+        # 4️⃣ Delete the session itself
+        db.delete(session)
         db.commit()
 
         return {
             "success": True,
-            "message": f"Deleted {deleted_count} messages from session {request.session_id}"
+            "message": f"Deleted session {request.session_id} with {deleted_count} messages"
         }
 
     except HTTPException:
