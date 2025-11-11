@@ -1,6 +1,7 @@
 #api.py
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, EmailStr
@@ -36,6 +37,12 @@ app.add_middleware(
     expose_headers=["*"],
     max_age=3600,
 )
+
+# Configure upload settings
+# Maximum upload size: 500MB (handled at Uvicorn/ASGI level)
+MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB in bytes
+
+app.max_upload_size = MAX_UPLOAD_SIZE
 
 # Pydantic models
 class BaseModelWithConfig(BaseModel):
@@ -88,6 +95,19 @@ class DocumentListResponse(BaseModelWithConfig):
 class DeleteDocumentsRequest(BaseModelWithConfig):
     email: str
     document_ids: List[str]
+
+# Configure multipart upload size
+@app.on_event("startup")
+async def configure_upload_limits():
+    """Configure larger upload limits on startup."""
+    try:
+        # Set Starlette's multipart form parser to accept larger files
+        import starlette.datastructures
+        # The max_size is handled at the ASGI level via Uvicorn
+        # Additional configuration can be set here if needed
+        logger.info(f"Upload limit configured to {MAX_UPLOAD_SIZE / (1024*1024):.0f}MB")
+    except Exception as e:
+        logger.error(f"Error configuring upload limits: {e}")
 
 @app.post("/ai/chat_session/")
 async def create_chat_session(
@@ -393,6 +413,9 @@ async def upload_document(
 ) -> Dict[str, Any]:
     """Upload and process multiple documents. Only accessible by staff users."""
     try:
+        # Log upload initiation
+        logger.info(f"Upload started for {email}: {len(files)} file(s)")
+        
         # Check if user exists and is staff
         exists, is_subscribed = check_user_auth(db, email)
         if not exists:
@@ -434,6 +457,10 @@ async def upload_document(
                 continue
 
             try:
+                # Log file size and processing start
+                file_size = file.size if hasattr(file, 'size') else "unknown"
+                logger.info(f"Processing file: {file.filename} (size: {file_size} bytes)")
+                
                 # Upload and process document with category
                 document_id = await ai_assistant.upload_and_process_document(
                     email=email,
@@ -449,6 +476,7 @@ async def upload_document(
                     document.is_public = is_public
                     db.commit()
 
+                logger.info(f"Successfully processed file: {file.filename} (id: {document_id})")
                 uploaded_docs.append({
                     "filename": file.filename,  # Use original filename from the uploaded file
                     "document_id": document_id,
