@@ -917,9 +917,13 @@ class AIAssistant:
                 deleted_count += 1
                 
                 logger.info(f"Deleted document {document.document_name} (ID: {document_id})")
+            
+            # Commit all deletions to database
+            self.db.commit()
                 
         except Exception as e:
             logger.error(f"Error deleting documents: {e}")
+            self.db.rollback()
             raise AIAssistantError(f"Failed to delete documents: {e}")
             
         return deleted_count
