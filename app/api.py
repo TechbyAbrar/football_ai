@@ -12,7 +12,7 @@ import os
 from dotenv.main import load_dotenv
 
 from app.models import Base, AI_User, AI_ChatSession, AI_ChatMessage, AI_Document
-from app.ai_assistant import AIAssistant, AIAssistantError
+from app.ai_assistant import AIAssistant, AIAssistantError, SUPPORTED_EXTENSIONS
 from app.database import get_db, engine, check_user_auth
 
 load_dotenv()
@@ -451,15 +451,33 @@ async def upload_document(
         ai_assistant = AIAssistant(db)
 
         for file in files:
-            # Validate file
-            if not file.filename.lower().endswith('.pdf'):
-                logger.warning(f"Skipping non-PDF file: {file.filename}")
+            # Validate file extension
+            import os as _os
+            ext = _os.path.splitext(file.filename)[1].lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                logger.warning(f"Skipping unsupported file: {file.filename} (type: {ext})")
+                uploaded_docs.append({
+                    "filename": file.filename,
+                    "status": "skipped",
+                    "error": f"Unsupported file type '{ext}'. Supported: {', '.join(SUPPORTED_EXTENSIONS)}"
+                })
                 continue
 
             try:
-                # Log file size and processing start
-                file_size = file.size if hasattr(file, 'size') else "unknown"
-                logger.info(f"Processing file: {file.filename} (size: {file_size} bytes)")
+                # Check file size before processing
+                file_size = file.size if hasattr(file, 'size') and file.size else None
+                if file_size and file_size > MAX_UPLOAD_SIZE:
+                    size_mb = file_size / (1024 * 1024)
+                    limit_mb = MAX_UPLOAD_SIZE / (1024 * 1024)
+                    uploaded_docs.append({
+                        "filename": file.filename,
+                        "file_size": file_size,
+                        "status": "error",
+                        "error": f"File too large ({size_mb:.1f}MB). Max allowed: {limit_mb:.0f}MB"
+                    })
+                    continue
+
+                logger.info(f"Processing file: {file.filename} (size: {file_size or 'unknown'} bytes)")
                 
                 # Upload and process document with category
                 document_id = await ai_assistant.upload_and_process_document(
@@ -478,7 +496,8 @@ async def upload_document(
 
                 logger.info(f"Successfully processed file: {file.filename} (id: {document_id})")
                 uploaded_docs.append({
-                    "filename": file.filename,  # Use original filename from the uploaded file
+                    "filename": file.filename,
+                    "file_size": file_size,
                     "document_id": document_id,
                     "category": category or "Uncategorized",
                     "status": "success"
@@ -488,6 +507,7 @@ async def upload_document(
                 logger.error(f"Error processing {file.filename}: {str(e)}")
                 uploaded_docs.append({
                     "filename": file.filename,
+                    "file_size": file_size,
                     "status": "error",
                     "error": str(e)
                 })

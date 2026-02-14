@@ -15,10 +15,16 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.api.models.Collection import Collection
 from PyPDF2._reader import PdfReader
+from docx import Document as DocxDocument
+import csv
+import io
 import re
 from dotenv.main import load_dotenv
 from app.database import get_user_full_name
 from app.models import AI_User, AI_ChatSession, AI_ChatMessage, AI_Document, AI_DocumentChunk
+
+# Supported file extensions for upload
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv"}
 
 # Load environment variables
 load_dotenv()
@@ -219,23 +225,40 @@ class AIAssistant:
             raise AIAssistantError(f"Failed to get/create collection: {e}")
 
     async def upload_and_process_document(self, email: str, file: UploadFile, category: Optional[str] = None) -> str:
-        """Upload and process a document."""
+        """Upload and process a document (PDF, DOCX, TXT, CSV)."""
         file_path = ""
         try:
             # Get original filename from the uploaded file
             filename = file.filename
+            ext = os.path.splitext(filename)[1].lower()
+
+            if ext not in SUPPORTED_EXTENSIONS:
+                raise AIAssistantError(
+                    f"Unsupported file type '{ext}'. Supported: {', '.join(SUPPORTED_EXTENSIONS)}"
+                )
             
             # Generate unique document ID and file path
             document_id = str(uuid.uuid4())
             file_path = os.path.join(self.upload_dir, f"{document_id}_{filename}")
             
-            # Save the uploaded file
+            # Stream-write the uploaded file to disk in chunks (avoids loading entire file into memory)
+            CHUNK_SIZE = 8 * 1024  # 8 KB
             with open(file_path, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
+                while True:
+                    chunk = await file.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    buffer.write(chunk)
             
-            # Extract text from PDF
-            text_content, page_count = self._extract_pdf_text(file_path)
+            # Extract text based on file type
+            if ext == ".pdf":
+                text_content, page_count = self._extract_pdf_text(file_path)
+            elif ext == ".docx":
+                text_content, page_count = self._extract_docx_text(file_path)
+            elif ext in (".txt", ".csv"):
+                text_content, page_count = self._extract_text_file(file_path)
+            else:
+                raise AIAssistantError(f"No extractor available for '{ext}'")
             
             # Create document record in database with the provided category
             document = AI_Document(
@@ -336,6 +359,63 @@ class AIAssistant:
         except Exception as e:
             logger.error(f"Error extracting PDF text: {e}")
             raise AIAssistantError(f"Failed to extract text from PDF: {e}")
+
+    def _extract_docx_text(self, file_path: str) -> tuple[str, int]:
+        """
+        Extract text content from a DOCX file.
+
+        Returns:
+            tuple: (extracted_text, page_count_estimate)
+        """
+        try:
+            doc = DocxDocument(file_path)
+            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+
+            if not paragraphs:
+                raise AIAssistantError("No text could be extracted from the DOCX file")
+
+            text_content = self._clean_text("\n".join(paragraphs))
+            # DOCX doesn't have a reliable page count; estimate ~3000 chars/page
+            page_count = max(1, len(text_content) // 3000)
+            return text_content, page_count
+
+        except AIAssistantError:
+            raise
+        except Exception as e:
+            logger.error(f"Error extracting DOCX text: {e}")
+            raise AIAssistantError(f"Failed to extract text from DOCX: {e}")
+
+    def _extract_text_file(self, file_path: str) -> tuple[str, int]:
+        """
+        Extract text content from a plain-text or CSV file.
+
+        Returns:
+            tuple: (extracted_text, page_count_estimate)
+        """
+        try:
+            # Try UTF-8 first, fall back to latin-1
+            for encoding in ("utf-8", "latin-1"):
+                try:
+                    with open(file_path, "r", encoding=encoding) as f:
+                        raw_text = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                raise AIAssistantError("Could not decode the text file with UTF-8 or Latin-1 encoding")
+
+            if not raw_text.strip():
+                raise AIAssistantError("The uploaded text file is empty")
+
+            text_content = self._clean_text(raw_text)
+            page_count = max(1, len(text_content) // 3000)
+            return text_content, page_count
+
+        except AIAssistantError:
+            raise
+        except Exception as e:
+            logger.error(f"Error extracting text file: {e}")
+            raise AIAssistantError(f"Failed to extract text from file: {e}")
 
     async def _process_and_store_chunks(self, document_id: str, email: str, text_content: str, document_name: str, category: Optional[str] = None):
         """
