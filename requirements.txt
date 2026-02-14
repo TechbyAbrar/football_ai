@@ -69,6 +69,7 @@ pydantic-core==2.41.5
 pygments==2.19.2
 pypdf2==3.0.1
 pypika==0.51.1
+python-docx==1.1.2
 pyproject-hooks==1.2.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
